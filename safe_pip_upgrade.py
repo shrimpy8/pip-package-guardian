@@ -634,8 +634,8 @@ class PipPackageGuardian:
                 
                 f.write("\necho 'Rollback complete!'\n")
             
-            # Make executable
-            os.chmod(self.rollback_file, 0o755)
+            # Make executable (user-only for security)
+            os.chmod(self.rollback_file, 0o700)
             
             self.print(f"[green]✓[/green] Rollback script: {self.rollback_file}")
             return True
@@ -699,12 +699,14 @@ class PipPackageGuardian:
         try:
             __import__(import_name)
             return True
-        except ImportError:
+        except (ImportError, Exception) as e:
             # Try original name
             try:
                 __import__(package_name)
                 return True
-            except ImportError:
+            except (ImportError, Exception) as e:
+                # Some packages have import-time side effects that can fail
+                self.log(f"Could not verify {package_name}: {str(e)}")
                 return False
     
     # ==================== UI AND DISPLAY ====================

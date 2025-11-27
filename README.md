@@ -1,5 +1,10 @@
 # pip Package Guardian
 
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
+![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
+![Rich](https://img.shields.io/badge/Rich-UI-purple.svg)
+
 Safe Python package upgrades with intelligent risk assessment and rollback capability.
 
 **Script:** `safe_pip_upgrade.py` - Because package upgrades shouldn't be scary.
@@ -26,6 +31,20 @@ This tool modifies your Python packages. While designed with extensive safety fe
 - ✅ **Batch Mode** - Review all packages, select which to upgrade
 - ✅ **Beautiful UI** - Color-coded risk levels with rich formatting (optional)
 - ✅ **Comprehensive Logging** - All actions logged to `~/pip-upgrade-logs/`
+
+## Screenshots
+
+### Environment Detection
+![Environment Detection](screenshots/detecting-python-env.png)
+*Automatically detects and validates your Python environment (venv, conda, homebrew, or system)*
+
+### Risk Assessment
+![Risk Assessment](screenshots/python-packages-upgrade-risk-assessment.png)
+*Intelligent risk classification with color-coded categories and dependency analysis*
+
+### Upgrade Options
+![Upgrade Options](screenshots/python-package-upgrade-options.png)
+*Flexible upgrade strategies from conservative to comprehensive*
 
 ## Quick Start
 
@@ -220,6 +239,9 @@ All files saved to `~/pip-upgrade-logs/`:
 4. **Timeout Protection** - 5-minute timeout on all commands
 5. **Safe File Operations** - Proper error handling and encoding
 6. **System Python Protection** - Never modifies macOS system Python
+7. **Secure File Permissions** - Rollback scripts set to user-only (0o700)
+8. **Enhanced Error Handling** - Catches all import exceptions including side effects
+9. **Zero External Dependencies** - Only standard library (rich is optional)
 
 ## Usage Examples
 
