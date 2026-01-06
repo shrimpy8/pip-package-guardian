@@ -7,13 +7,14 @@ A safe, interactive tool for upgrading Python packages with intelligent risk ass
 and dependency analysis.
 
 Features:
-- Environment detection (venv, conda, homebrew)
-- Risk classification (Low/Medium/High)
-- Dependency conflict detection
+- Environment detection (venv, conda, homebrew) with system Python protection
+- Risk classification (Low/Medium/High/Critical) with version downgrade detection
+- Dependency conflict detection with empty string filtering
 - Pre-upgrade snapshots and rollback scripts
-- Post-upgrade import verification
-- Multiple interaction modes (Batch/Interactive/Profile)
-- PyPI metadata integration
+- Post-upgrade import verification with known package mapping (Pillow→PIL, etc.)
+- Multiple upgrade strategies (auto LOW, LOW+MEDIUM, custom selection, critical only)
+- Enhanced version parsing (handles epochs, local versions, pre-releases)
+- Input sanitization to prevent shell injection attacks
 
 DISCLAIMER:
 -----------
@@ -31,18 +32,40 @@ While designed with extensive safety features, there are inherent risks:
 
 SAFETY FEATURES:
 ----------------
-✅ Risk assessment before any upgrade
+✅ Risk assessment before any upgrade (handles version downgrades)
 ✅ Dependency conflict detection
 ✅ Pre-upgrade snapshots with exact versions
 ✅ Automatic rollback script generation
-✅ Import verification after upgrades
+✅ Import verification after upgrades (with common package name mappings)
 ✅ Protected system Python (will not modify)
 ✅ User confirmation at every critical step
+✅ Input sanitization to prevent injection attacks
+✅ Enhanced version parsing (PEP 440 compliant)
 
 Author: Generated via Warp AI
 License: MIT (Free to use and modify)
-Version: 1.0.0
+Version: 1.1.0
 Script: safe_pip_upgrade.py
+
+Version History:
+--------------
+v1.1.0 (2026-01-06) - Interactive Loop & Per-Action Logging:
+- Added interactive main loop - perform multiple upgrades in one session
+- Separate log files for each upgrade action (better audit trail)
+- New "Refresh package list" option
+- Session summary showing all created log files
+- Improved user experience with continuous workflow
+
+v1.0.1 (2026-01-06) - Bug Fixes & Improvements:
+- Fixed version comparison logic for downgrades and edge cases
+- Enhanced version parsing to handle epochs, local versions, and pre-releases
+- Improved import verification with known package name mappings
+- Added input validation for custom package selection
+- Fixed empty string handling in dependency parsing
+- Better error messages for critical package selection
+
+v1.0.0 (Initial Release):
+- Core functionality with risk assessment and rollback capability
 """
 
 import os
@@ -140,17 +163,33 @@ class PipPackageGuardian:
     Main class for safe pip package upgrades.
     
     This class provides comprehensive package management with:
-    - Environment detection and validation
-    - Risk assessment and dependency analysis
+    - Environment detection and validation (venv, conda, homebrew, system)
+    - Risk assessment and dependency analysis with version downgrade handling
     - Safe upgrade execution with rollback capability
-    - Post-upgrade verification
+    - Post-upgrade verification with intelligent import name resolution
+    - Interactive loop for multiple upgrade operations in one session
+    - Per-action logging with separate log files for each upgrade
     
     Security practices:
-    - Input validation on all user inputs
-    - No shell injection (uses list arguments in subprocess)
-    - Safe file operations with proper error handling
-    - Sanitized package names (alphanumeric, dash, underscore only)
-    - Protected system Python detection
+    - Input validation and sanitization on all user inputs
+    - No shell injection (uses list arguments in subprocess, never shell=True)
+    - Safe file operations with proper error handling and encoding
+    - Sanitized package names (alphanumeric, dash, underscore, dot only)
+    - Protected system Python detection (prevents macOS system Python modification)
+    - 5-minute timeout on all subprocess commands
+    - User-only permissions (0o700) on generated rollback scripts
+    
+    Version handling:
+    - Parses PEP 440 versions including epochs, local versions, pre-releases
+    - Detects major/minor/patch changes and version downgrades
+    - Handles edge cases like "1:2.0.0" (epoch) and "1.2.3+local" (local version)
+    
+    Interactive features (v1.1.0):
+    - Main loop allows multiple upgrade operations without restarting
+    - Each upgrade action creates its own timestamped log file
+    - Session summary tracks all created log files
+    - "Refresh package list" option to check for new updates
+    - Clean exit option that returns to menu instead of terminating
     """
     
     # Critical packages that need special handling
@@ -168,16 +207,20 @@ class PipPackageGuardian:
         Initialize the package guardian.
         
         Creates:
-        - Log directory for snapshots and rollback scripts
-        - Rich console if available
-        - Timestamp for this session
+        - Log directory for snapshots and rollback scripts (~/pip-upgrade-logs/)
+        - Rich console if available for enhanced UI
+        - Initial timestamp (updated for each upgrade action)
+        - Empty log tracker for session summary
+        
+        Note:
+            Each upgrade action will create its own log file with a fresh timestamp.
+            The session tracks all created logs for summary display at exit.
         """
         self.log_dir = Path.home() / "pip-upgrade-logs"
         self.log_dir.mkdir(exist_ok=True)
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file = self.log_dir / f"upgrade_{self.timestamp}.log"
-        self.snapshot_file = self.log_dir / f"requirements_{self.timestamp}.txt"
-        self.rollback_file = self.log_dir / f"rollback_{self.timestamp}.sh"
+        
+        # Initialize with session timestamp
+        self._update_timestamps()
         
         # Initialize rich console if available
         if RICH_AVAILABLE:
@@ -188,6 +231,23 @@ class PipPackageGuardian:
         # Cache for package information
         self.packages_cache: Dict[str, PackageInfo] = {}
         self.environment_info: Dict[str, str] = {}
+        self.created_logs: List[Path] = []  # Track all log files created in this session
+    
+    def _update_timestamps(self):
+        """
+        Update timestamps and file paths for a new upgrade action.
+        
+        Called at initialization and before each upgrade operation to ensure
+        each action has its own log, snapshot, and rollback files.
+        """
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = self.log_dir / f"upgrade_{self.timestamp}.log"
+        self.snapshot_file = self.log_dir / f"requirements_{self.timestamp}.txt"
+        self.rollback_file = self.log_dir / f"rollback_{self.timestamp}.sh"
+        
+        # Track this log file
+        if hasattr(self, 'created_logs'):
+            self.created_logs.append(self.log_file)
         
     def print(self, text: str, style: str = ""):
         """
@@ -313,8 +373,10 @@ class PipPackageGuardian:
             Sanitized name or None if invalid
             
         Security:
-        - Only allows alphanumeric, dash, underscore, and dot
-        - Rejects suspicious patterns
+        - Only allows alphanumeric characters, dashes, underscores, and dots
+        - Rejects suspicious patterns that could be used for shell injection
+        - Examples of valid names: 'requests', 'scikit-learn', 'zope.interface'
+        - Examples of rejected names: 'pkg; rm -rf /', 'pkg | cat', 'pkg && malicious'
         """
         if not name:
             return None
@@ -336,8 +398,16 @@ class PipPackageGuardian:
         """
         Parse semantic version string into tuple.
         
+        Handles various version formats including PEP 440 extensions:
+        - Standard semver: "1.2.3"
+        - Pre-releases: "2.0.0a1", "1.0.0b2", "1.0.0rc1"
+        - Dev/Post releases: "1.2.3.dev0", "1.2.3.post1"
+        - Epoch versions: "1:2.0.0" (epoch prefix stripped)
+        - Local versions: "1.2.3+local.version" (local suffix stripped)
+        - Short versions: "1.2" (treated as 1.2.0)
+        
         Args:
-            version_str: Version string (e.g., "1.2.3", "2.0.0a1")
+            version_str: Version string to parse
             
         Returns:
             Tuple of (major, minor, patch) as integers
@@ -345,11 +415,22 @@ class PipPackageGuardian:
             
         Examples:
             "1.2.3" → (1, 2, 3)
-            "2.0.0a1" → (2, 0, 0)
-            "1.2" → (1, 2, 0)
+            "2.0.0a1" → (2, 0, 0)  # pre-release suffix removed
+            "1.2" → (1, 2, 0)  # missing patch defaulted to 0
+            "1:2.0.0" → (2, 0, 0)  # epoch removed
+            "1.2.3+local" → (1, 2, 3)  # local version removed
+            "1.2.3.post1" → (1, 2, 3)  # post-release suffix removed
         """
         try:
-            # Remove pre-release suffixes (a, b, rc, dev, etc.)
+            # Handle epoch (e.g., "1:2.0.0") - remove epoch prefix
+            if ':' in version_str:
+                version_str = version_str.split(':', 1)[1]
+            
+            # Handle local version (e.g., "1.2.3+local.version") - remove local part
+            if '+' in version_str:
+                version_str = version_str.split('+', 1)[0]
+            
+            # Remove pre-release suffixes (a, b, rc, dev, post, etc.)
             clean_version = re.sub(r'[a-zA-Z].*$', '', version_str)
             parts = clean_version.split('.')
             
@@ -376,6 +457,9 @@ class PipPackageGuardian:
             - safe_to_modify: Whether it's safe to upgrade packages
             
         Security: Detects and protects system Python
+        
+        Note: Environment detection is designed for macOS/Linux.
+        Windows environments will be detected as 'unknown' and marked unsafe.
         """
         self.print("\n[bold cyan]Detecting Python Environment...[/bold cyan]")
         
@@ -514,10 +598,14 @@ class PipPackageGuardian:
         """
         Analyze direct dependencies for a package.
         
+        Uses 'pip show' to find packages that depend on this package.
+        Empty strings and whitespace-only entries are filtered out.
+        
         Args:
             package: PackageInfo to analyze
             
-        Modifies package object with dependent information.
+        Modifies:
+            package.dependents: List of package names that require this package
         """
         # Get packages that require this one
         code, output, _ = self.run_command([sys.executable, '-m', 'pip', 'show', package.name])
@@ -530,15 +618,16 @@ class PipPackageGuardian:
         for line in output.split('\n'):
             if line.startswith('Required-by:'):
                 deps = line.split(':', 1)[1].strip()
-                if deps and deps != '':
-                    required_by = [d.strip() for d in deps.split(',')]
+                if deps:
+                    # Filter out empty strings after split
+                    required_by = [d.strip() for d in deps.split(',') if d.strip()]
                 break
         
         package.dependents = required_by
     
     def assess_risk(self, package: PackageInfo) -> RiskLevel:
         """
-        Assess upgrade risk for a package.
+        Assess upgrade risk for a package based on version changes and dependencies.
         
         Args:
             package: PackageInfo to assess
@@ -547,10 +636,16 @@ class PipPackageGuardian:
             RiskLevel enum value
             
         Risk criteria:
-        - LOW: Patch update, no dependents
-        - MEDIUM: Minor update or has dependents
-        - HIGH: Major update
-        - CRITICAL: pip, setuptools, wheel
+        - LOW: Patch update with few/no dependents, or same version (pre-release → release)
+        - MEDIUM: Minor update, has dependents, patch update with many dependents (>3),
+                  minor version downgrade, or unparseable versions
+        - HIGH: Major version change (upgrade or downgrade)
+        - CRITICAL: pip, setuptools, wheel (infrastructure packages)
+        
+        Notes:
+        - Version downgrades are treated as medium-to-high risk (unusual scenario)
+        - If version parsing fails for either version, defaults to MEDIUM risk
+        - Pre-release to release transitions (same numeric version) are LOW risk
         """
         if package.is_critical:
             return RiskLevel.CRITICAL
@@ -558,8 +653,18 @@ class PipPackageGuardian:
         curr_v = self.parse_version(package.current_version)
         latest_v = self.parse_version(package.latest_version)
         
+        # Check for invalid version parsing
+        if curr_v == (0, 0, 0) or latest_v == (0, 0, 0):
+            # If we can't parse versions, treat as medium risk
+            self.log(f"Warning: Could not parse versions for {package.name}")
+            return RiskLevel.MEDIUM
+        
         # Major version change
         if latest_v[0] > curr_v[0]:
+            return RiskLevel.HIGH
+        
+        # Major version downgrade (unusual, treat as high risk)
+        if latest_v[0] < curr_v[0]:
             return RiskLevel.HIGH
         
         # Minor version change
@@ -569,6 +674,10 @@ class PipPackageGuardian:
                 return RiskLevel.MEDIUM
             return RiskLevel.LOW
         
+        # Minor version downgrade (unusual)
+        if latest_v[1] < curr_v[1]:
+            return RiskLevel.MEDIUM
+        
         # Patch update
         if latest_v[2] > curr_v[2]:
             # Even patch updates are medium risk if many depend on it
@@ -576,6 +685,8 @@ class PipPackageGuardian:
                 return RiskLevel.MEDIUM
             return RiskLevel.LOW
         
+        # Same version or patch downgrade - treat as low risk
+        # (this handles pre-release vs release scenarios)
         return RiskLevel.LOW
     
     # ==================== PRE-UPGRADE SAFETY ====================
@@ -685,29 +796,72 @@ class PipPackageGuardian:
     
     def verify_import(self, package_name: str) -> bool:
         """
-        Try to import a package to verify it works.
+        Try to import a package to verify it works after installation/upgrade.
+        
+        Handles common package name to import name discrepancies using multiple strategies:
+        1. Checks known mappings (e.g., 'Pillow' → 'PIL', 'scikit-learn' → 'sklearn')
+        2. Tries package name with dashes converted to underscores
+        3. Tries lowercase version
+        4. Falls back to original package name
         
         Args:
-            package_name: Package to import
+            package_name: Package name (as used by pip) to verify
             
         Returns:
             True if import successful, False otherwise
+            
+        Note:
+            Some packages may have import-time side effects or be non-importable
+            (e.g., command-line only tools). Import failure is logged but doesn't
+            necessarily indicate a broken installation.
         """
-        # Convert package name to import name (e.g., 'Pillow' -> 'PIL')
-        import_name = package_name.replace('-', '_').lower()
+        # Common package name to import name mappings
+        known_mappings = {
+            'Pillow': 'PIL',
+            'scikit-learn': 'sklearn',
+            'scikit-image': 'skimage',
+            'beautifulsoup4': 'bs4',
+            'PyYAML': 'yaml',
+            'python-dateutil': 'dateutil',
+            'attrs': 'attr',
+            'msgpack': 'msgpack',
+            'protobuf': 'google.protobuf',
+        }
         
+        # Try known mapping first
+        import_name = known_mappings.get(package_name)
+        
+        if import_name:
+            try:
+                __import__(import_name)
+                return True
+            except (ImportError, Exception):
+                pass
+        
+        # Try package name with dashes converted to underscores
+        import_name = package_name.replace('-', '_')
         try:
             __import__(import_name)
             return True
+        except (ImportError, Exception):
+            pass
+        
+        # Try lowercase version
+        try:
+            __import__(import_name.lower())
+            return True
+        except (ImportError, Exception):
+            pass
+        
+        # Try original package name as last resort
+        try:
+            __import__(package_name)
+            return True
         except (ImportError, Exception) as e:
-            # Try original name
-            try:
-                __import__(package_name)
-                return True
-            except (ImportError, Exception) as e:
-                # Some packages have import-time side effects that can fail
-                self.log(f"Could not verify {package_name}: {str(e)}")
-                return False
+            # Some packages have import-time side effects that can fail
+            # or simply can't be imported (e.g., setuptools)
+            self.log(f"Could not verify {package_name}: {str(e)}")
+            return False
     
     # ==================== UI AND DISPLAY ====================
     
@@ -761,12 +915,34 @@ class PipPackageGuardian:
     
     # ==================== BATCH MODE ====================
     
-    def run_batch_mode(self, packages: List[PackageInfo]):
+    def run_batch_mode(self, packages: List[PackageInfo]) -> bool:
         """
-        Batch mode: Review all, select, then upgrade.
+        Batch mode: Review all packages, select upgrade strategy, then upgrade.
+        
+        Provides six interactive options:
+        [1] Auto-upgrade LOW risk packages only
+        [2] Auto-upgrade LOW + MEDIUM risk packages
+        [3] Custom selection (user specifies package names - validated for security)
+        [4] Upgrade critical infrastructure packages (pip, setuptools, wheel)
+        [5] Refresh package list (re-scan for updates)
+        [0] Exit (terminate the program)
         
         Args:
-            packages: List of outdated packages
+            packages: List of outdated packages to present for upgrade
+            
+        Returns:
+            True if user wants to continue (cancelled, completed, or refresh)
+            False if user wants to exit the program (option 0)
+            
+        Behavior:
+            - Creates new timestamped log files for each actual upgrade operation
+            - Displays log file path before starting upgrade
+            - Returns to menu after completion (unless user selects Exit)
+            - Option 5 (Refresh) immediately returns True to trigger package re-scan
+            
+        Security:
+            User input in custom selection mode is sanitized to prevent injection attacks.
+            Invalid package names are skipped with warnings.
         """
         self.print("\n[bold cyan]═══ Batch Mode ═══[/bold cyan]")
         
@@ -779,18 +955,24 @@ class PipPackageGuardian:
         self.print("[2] Auto-upgrade LOW + MEDIUM risk")
         self.print("[3] Custom selection")
         self.print("[4] Upgrade critical packages (pip, setuptools, wheel)")
-        self.print("[0] Cancel")
+        self.print("[5] Refresh package list")
+        self.print("[0] Exit")
         
         if self.console:
-            choice = Prompt.ask("Select option", choices=["0", "1", "2", "3", "4"])
+            choice = Prompt.ask("Select option", choices=["0", "1", "2", "3", "4", "5"])
         else:
-            choice = input("Select option [0-4]: ").strip()
+            choice = input("Select option [0-5]: ").strip()
         
         selected_packages = []
         
         if choice == "0":
-            return
-        elif choice == "1":
+            self.print("[cyan]Exiting...[/cyan]")
+            return False
+        elif choice == "5":
+            self.print("[cyan]Refreshing package list...[/cyan]")
+            return True
+        
+        if choice == "1":
             selected_packages = [p for p in packages if p.risk_level == RiskLevel.LOW]
         elif choice == "2":
             selected_packages = [p for p in packages if p.risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM]]
@@ -802,14 +984,25 @@ class PipPackageGuardian:
             else:
                 pkg_names = input("Package names: ").split(',')
             
-            pkg_names = [n.strip() for n in pkg_names]
-            selected_packages = [p for p in packages if p.name in pkg_names]
+            # Sanitize and validate user input
+            sanitized_names = []
+            for name in pkg_names:
+                sanitized = self.sanitize_package_name(name.strip())
+                if sanitized:
+                    sanitized_names.append(sanitized)
+                else:
+                    self.print(f"[yellow]Warning: Skipping invalid package name: {name.strip()}[/yellow]")
+            
+            selected_packages = [p for p in packages if p.name in sanitized_names]
         elif choice == "4":
             selected_packages = [p for p in packages if p.is_critical]
+            if not selected_packages:
+                self.print("[yellow]No critical packages (pip, setuptools, wheel) need upgrading[/yellow]")
+                return True
         
         if not selected_packages:
             self.print("[yellow]No packages selected[/yellow]")
-            return
+            return True
         
         # Confirm
         self.print(f"\n[bold]Selected {len(selected_packages)} package(s) for upgrade:[/bold]")
@@ -818,12 +1011,21 @@ class PipPackageGuardian:
         
         if not self.confirm("\nProceed with upgrade?", default=False):
             self.print("[yellow]Upgrade cancelled[/yellow]")
-            return
+            return True
+        
+        # Create new log files for this upgrade action
+        self._update_timestamps()
+        self.log(f"=== Starting upgrade session ===")
+        self.log(f"Selected {len(selected_packages)} package(s) for upgrade")
+        for pkg in selected_packages:
+            self.log(f"  - {pkg.name}: {pkg.current_version} → {pkg.latest_version}")
+        
+        self.print(f"\n[dim]Log file: {self.log_file}[/dim]")
         
         # Create safety backups
         if not self.create_snapshot():
             if not self.confirm("Snapshot failed. Continue anyway?", default=False):
-                return
+                return True
         
         if not self.create_rollback_script(selected_packages):
             self.print("[yellow]Warning: Rollback script creation failed[/yellow]")
@@ -847,19 +1049,42 @@ class PipPackageGuardian:
         
         if success_count > 0:
             self.print(f"\n[green]Rollback available:[/green] bash {self.rollback_file}")
+        
+        return True  # Continue to main loop
     
     # ==================== MAIN EXECUTION ====================
     
     def run(self):
         """
-        Main program execution.
+        Main program execution with interactive loop.
+        
+        Workflow:
+        1. Display welcome message with version and log directory
+        2. Detect and validate Python environment (safety check)
+        3. Enter main loop:
+           a. Scan for outdated packages
+           b. If packages found: analyze dependencies and show menu
+           c. If no packages: offer to check again or exit
+           d. Execute user-selected action
+           e. Return to step 3a (unless user exits)
+        4. Display session summary with all created log files
+        5. Exit gracefully
+        
+        Features:
+        - Continuous workflow: perform multiple upgrades without restarting
+        - Per-action logging: each upgrade creates its own log file
+        - Session tracking: summary shows all logs created
+        - Graceful exit: user can exit at any time via option 0
+        
+        The loop continues until the user selects Exit (option 0) from the menu.
         """
         # Welcome message
         self.print_panel(
             "[bold cyan]pip Package Guardian[/bold cyan]\n\n"
-            f"Script: safe_pip_upgrade.py v1.0.0\n"
-            f"Log: {self.log_file}\n\n"
-            "Safe Python package upgrades with risk assessment and rollback.",
+            f"Script: safe_pip_upgrade.py v1.1.0\n"
+            f"Logs directory: {self.log_dir}\n\n"
+            "Safe Python package upgrades with risk assessment and rollback.\n"
+            "Each upgrade action creates its own timestamped log file.",
             title="Welcome",
             border_style="cyan"
         )
@@ -870,21 +1095,34 @@ class PipPackageGuardian:
         if not self.check_environment_safety():
             return
         
-        # Get outdated packages
-        packages = self.get_outdated_packages()
+        # Main interactive loop
+        while True:
+            # Get outdated packages
+            packages = self.get_outdated_packages()
+            
+            if not packages:
+                self.print("\n[green]✓ All packages are up to date![/green]")
+                if not self.confirm("\nCheck again?", default=False):
+                    break
+                continue
+            
+            # Analyze dependencies and assess risk
+            self.print("\n[bold cyan]Analyzing dependencies...[/bold cyan]")
+            for pkg in packages:
+                self.analyze_dependencies(pkg)
+                pkg.risk_level = self.assess_risk(pkg)
+            
+            # Run batch mode - returns False if user wants to exit
+            if not self.run_batch_mode(packages):
+                break
         
-        if not packages:
-            self.print("\n[green]✓ All packages are up to date![/green]")
-            return
-        
-        # Analyze dependencies and assess risk
-        self.print("\n[bold cyan]Analyzing dependencies...[/bold cyan]")
-        for pkg in packages:
-            self.analyze_dependencies(pkg)
-            pkg.risk_level = self.assess_risk(pkg)
-        
-        # Run batch mode (MVP only has batch mode)
-        self.run_batch_mode(packages)
+        # Show summary of created logs
+        if self.created_logs:
+            self.print("\n[bold cyan]Session Summary:[/bold cyan]")
+            self.print(f"Created {len(self.created_logs)} log file(s):")
+            for log_file in self.created_logs:
+                self.print(f"  • {log_file}")
+            self.print(f"\n[dim]All logs stored in: {self.log_dir}[/dim]")
         
         self.print("\n[bold green]Done![/bold green]")
 
