@@ -28,6 +28,8 @@ This tool modifies your Python packages. While designed with extensive safety fe
 - ✅ **Pre-Upgrade Snapshots** - Creates requirements.txt backup before any changes
 - ✅ **Rollback Scripts** - Automatic shell script generation for one-command rollback
 - ✅ **Import Verification** - Tests each package after upgrade to ensure it works
+- ✅ **Clean Pip Subprocesses** - Runs pip with a sanitized env to avoid user-site hooks and import-time hangs
+- ✅ **Post-Upgrade pip check** - Optional `pip check` to surface dependency conflicts
 - ✅ **Batch Mode** - Review all packages, select which to upgrade
 - ✅ **Beautiful UI** - Color-coded risk levels with rich formatting (optional)
 - ✅ **Comprehensive Logging** - All actions logged to `~/pip-upgrade-logs/`
@@ -200,7 +202,7 @@ ls -lt ~/pip-upgrade-logs/ | head -10
 
 ### ✅ Supported Environments
 - **Virtual Environments** (venv) - Recommended
-- **Conda Environments** - Fully supported
+- **Conda Environments** - Supported with safety gating
 - **Homebrew Global Python** - Supported with warnings
 
 ### ❌ Not Supported
@@ -237,6 +239,28 @@ All files saved to `~/pip-upgrade-logs/`:
 2. **Package Name Sanitization** - Validates all package names
 3. **Input Validation** - All user inputs validated
 4. **Timeout Protection** - 5-minute timeout on all commands
+
+## Conda Safety Notes
+
+If you run the tool in a conda environment:
+
+- The script will **prompt before using pip**, since mixing conda and pip can cause binary conflicts.
+- It will **automatically skip likely compiled packages** (native extensions) and only proceed with pure‑python upgrades.
+- It will **offer to run `pip check`** after upgrades to detect conflicts.
+
+Conda update examples:
+
+```bash
+conda update <package>
+conda install -c conda-forge <package>
+conda update --all
+```
+
+## FAQ
+
+**Why does the script skip compiled packages in conda environments?**
+
+Conda manages native libraries and binary dependencies. Upgrading compiled packages via pip can override conda’s versions and lead to hard‑to‑debug conflicts. The script skips likely compiled packages to reduce that risk and encourages using conda for those updates.
 5. **Safe File Operations** - Proper error handling and encoding
 6. **System Python Protection** - Never modifies macOS system Python
 7. **Secure File Permissions** - Rollback scripts set to user-only (0o700)

@@ -23,6 +23,7 @@ By using this tool, you acknowledge and accept the following risks:
 - Version pinning in requirements.txt may become invalid
 - Circular dependencies can create deadlocks
 - Some packages may have incompatible version requirements
+- Mixing conda and pip upgrades can override binary dependencies
 
 ### 3. 🔴 Data Loss Risk
 - While unlikely, system issues during upgrades could lead to data loss
@@ -81,6 +82,7 @@ By using this tool, you acknowledge and accept the following risks:
 - Use virtual environments (venv/conda)
 - Never upgrade system Python packages
 - Verify you're in the correct environment
+- In conda, prefer conda for compiled packages; use pip for pure‑python
 - Check disk space for package downloads
 - Ensure network connectivity is stable
 
@@ -154,6 +156,7 @@ pip install -r requirements_BACKUP.txt
 - **Pre-Upgrade Snapshots** - Saves exact current versions
 - **Rollback Scripts** - Generates automatic recovery scripts
 - **Import Verification** - Tests packages after upgrade
+- **pip check (optional)** - Surfaces dependency conflicts after upgrades
 - **System Python Protection** - Never touches macOS system Python
 - **Input Validation** - Prevents injection attacks
 - **Command Logging** - Records all operations
