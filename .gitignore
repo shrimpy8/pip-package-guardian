@@ -35,3 +35,6 @@ htmlcov/
 # Local configuration
 config.local.json
 .env
+
+# Local roadmap
+ROADMAP.md

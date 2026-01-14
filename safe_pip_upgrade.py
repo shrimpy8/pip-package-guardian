@@ -80,6 +80,7 @@ from typing import Dict, List, Tuple, Optional, Set
 from enum import Enum
 import urllib.request
 import urllib.error
+import importlib.metadata
 
 # Try to import rich for better UI
 try:
@@ -323,8 +324,22 @@ class PipPackageGuardian:
         
         if self.console:
             self.print(f"[dim]{message}[/dim]")
+
+    def pip_env(self) -> Dict[str, str]:
+        """
+        Build a clean environment for pip subprocesses.
+        
+        Avoids user-site imports and custom PYTHONPATH that can trigger
+        heavy imports or deadlocks during pip operations.
+        """
+        env = os.environ.copy()
+        # Keep pip subprocesses isolated from user customizations.
+        env["PYTHONNOUSERSITE"] = "1"
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+        return env
     
-    def run_command(self, cmd: List[str], capture: bool = True) -> Tuple[int, str, str]:
+    def run_command(self, cmd: List[str], capture: bool = True, env: Optional[Dict[str, str]] = None) -> Tuple[int, str, str]:
         """
         Execute a command safely.
         
@@ -343,12 +358,14 @@ class PipPackageGuardian:
         self.log(f"Running: {' '.join(cmd)}")
         
         try:
+            # Allow a clean env for pip to avoid user-site hooks/side effects.
             result = subprocess.run(
                 cmd,
                 capture_output=capture,
                 text=True,
                 check=False,  # We handle errors manually
-                timeout=300   # 5 minute timeout for safety
+                timeout=300,  # 5 minute timeout for safety
+                env=env
             )
             
             if capture:
@@ -487,6 +504,12 @@ class PipPackageGuardian:
             env_info['name'] = os.environ['CONDA_DEFAULT_ENV']
             env_info['safe_to_modify'] = True
             self.print(f"[green]✓ Conda Environment: {env_info['name']}[/green]")
+            self.print("[yellow]Note: Mixing pip upgrades with conda can cause binary conflicts.[/yellow]")
+            self.print("[yellow]Prefer conda for compiled packages (numpy/scipy/pandas), pip for pure-python.[/yellow]")
+            self.print("[yellow]Conda update examples:[/yellow]")
+            self.print("  conda update <package>")
+            self.print("  conda install -c conda-forge <package>")
+            self.print("  conda update --all")
         
         # Check if Homebrew Python
         elif '/opt/homebrew' in python_path or '/usr/local/Cellar' in python_path:
@@ -539,7 +562,28 @@ class PipPackageGuardian:
             
             return False
         
+        if self.environment_info['type'] == 'conda':
+            if not self.confirm("\nThis is a conda-managed env. Use pip only for pure-python packages. Continue with pip upgrades?", default=False):
+                self.print("[yellow]Upgrade cancelled. Use conda to update compiled packages.[/yellow]")
+                return False
+        
         return True
+
+    def run_pip_check(self):
+        """
+        Run 'pip check' to detect dependency conflicts after upgrades.
+        """
+        self.print("\n[bold]Running pip check...[/bold]")
+        code, output, error = self.run_command(
+            [sys.executable, '-m', 'pip', 'check'],
+            env=self.pip_env()
+        )
+        if code == 0:
+            self.print("[green]✓ pip check passed (no conflicts)[/green]")
+            return
+        details = output or error or "Unknown error"
+        self.print("[red]✗ pip check reported issues:[/red]")
+        self.print(details)
     
     # ==================== PACKAGE SCANNING ====================
     
@@ -554,7 +598,11 @@ class PipPackageGuardian:
         """
         self.print("\n[bold cyan]Scanning for outdated packages...[/bold cyan]")
         
-        code, output, _ = self.run_command([sys.executable, '-m', 'pip', 'list', '--outdated', '--format=json'])
+        # Use a clean env to reduce import-time hangs during pip execution.
+        code, output, _ = self.run_command(
+            [sys.executable, '-m', 'pip', 'list', '--outdated', '--format=json'],
+            env=self.pip_env()
+        )
         
         if code != 0:
             self.print("[red]✗ Failed to get package list[/red]")
@@ -608,7 +656,11 @@ class PipPackageGuardian:
             package.dependents: List of package names that require this package
         """
         # Get packages that require this one
-        code, output, _ = self.run_command([sys.executable, '-m', 'pip', 'show', package.name])
+        # Use a clean env to reduce import-time hangs during pip execution.
+        code, output, _ = self.run_command(
+            [sys.executable, '-m', 'pip', 'show', package.name],
+            env=self.pip_env()
+        )
         
         if code != 0:
             return
@@ -624,6 +676,20 @@ class PipPackageGuardian:
                 break
         
         package.dependents = required_by
+
+    def is_likely_compiled(self, package_name: str) -> bool:
+        """
+        Heuristic: check whether installed files suggest native extensions.
+        """
+        try:
+            dist = importlib.metadata.distribution(package_name)
+        except importlib.metadata.PackageNotFoundError:
+            return False
+        for file in dist.files or []:
+            path = str(file).lower()
+            if path.endswith(('.so', '.pyd', '.dylib', '.dll')):
+                return True
+        return False
     
     def assess_risk(self, package: PackageInfo) -> RiskLevel:
         """
@@ -702,7 +768,11 @@ class PipPackageGuardian:
         """
         self.print("\n[bold]Creating safety snapshot...[/bold]")
         
-        code, output, _ = self.run_command([sys.executable, '-m', 'pip', 'freeze'])
+        # Use a clean env to reduce import-time hangs during pip execution.
+        code, output, _ = self.run_command(
+            [sys.executable, '-m', 'pip', 'freeze'],
+            env=self.pip_env()
+        )
         
         if code != 0:
             self.print("[red]✗ Failed to create snapshot[/red]")
@@ -775,26 +845,30 @@ class PipPackageGuardian:
         
         self.print(f"  Upgrading {safe_name}...")
         
-        code, output, error = self.run_command([
-            sys.executable, '-m', 'pip', 'install', 
-            '--upgrade', safe_name
-        ])
+        # Use a clean env to reduce import-time hangs during pip execution.
+        code, output, error = self.run_command(
+            [sys.executable, '-m', 'pip', 'install', '--upgrade', safe_name],
+            env=self.pip_env()
+        )
         
         if code == 0:
             # Try to import the package to verify
-            if self.verify_import(safe_name):
+            verify_result = self.verify_import(safe_name)
+            if verify_result is True:
                 self.print(f"  [green]✓[/green] {safe_name} upgraded successfully")
                 return True
-            else:
-                self.print(f"  [yellow]⚠[/yellow] {safe_name} upgraded but import failed")
-                return True  # Still count as successful upgrade
+            if verify_result is None:
+                self.print(f"  [yellow]⚠[/yellow] {safe_name} upgraded (verification skipped)")
+                return True
+            self.print(f"  [yellow]⚠[/yellow] {safe_name} upgraded but import failed")
+            return True  # Still count as successful upgrade
         else:
             self.print(f"  [red]✗[/red] Failed to upgrade {safe_name}")
             if error:
                 self.log(f"Error: {error}")
             return False
     
-    def verify_import(self, package_name: str) -> bool:
+    def verify_import(self, package_name: str) -> Optional[bool]:
         """
         Try to import a package to verify it works after installation/upgrade.
         
@@ -808,60 +882,106 @@ class PipPackageGuardian:
             package_name: Package name (as used by pip) to verify
             
         Returns:
-            True if import successful, False otherwise
+            True if import successful, False otherwise, None if verification skipped
             
         Note:
             Some packages may have import-time side effects or be non-importable
             (e.g., command-line only tools). Import failure is logged but doesn't
             necessarily indicate a broken installation.
         """
-        # Common package name to import name mappings
+        # Explicit dist->import mappings for common mismatches and namespace dists.
         known_mappings = {
-            'Pillow': 'PIL',
-            'scikit-learn': 'sklearn',
-            'scikit-image': 'skimage',
-            'beautifulsoup4': 'bs4',
-            'PyYAML': 'yaml',
-            'python-dateutil': 'dateutil',
-            'attrs': 'attr',
-            'msgpack': 'msgpack',
-            'protobuf': 'google.protobuf',
+            'Pillow': ['PIL'],
+            'scikit-learn': ['sklearn'],
+            'scikit-image': ['skimage'],
+            'beautifulsoup4': ['bs4'],
+            'PyYAML': ['yaml'],
+            'python-dateutil': ['dateutil'],
+            'attrs': ['attr'],
+            'msgpack': ['msgpack'],
+            'protobuf': ['google.protobuf'],
+            'grpcio': ['grpc'],
+            'google-api-core': ['google.api_core'],
+            'google-auth': ['google.auth'],
+            'google-api-python-client': ['googleapiclient'],
+            'google-cloud-storage': ['google.cloud.storage'],
+            'google-cloud-bigquery': ['google.cloud.bigquery'],
+            'google-cloud-aiplatform': ['google.cloud.aiplatform'],
+            'google-cloud-appengine-logging': ['google.cloud.appengine_logging'],
+            'google-genai': ['google.genai'],
+            'haystack-ai': ['haystack'],
+            'firecrawl-py': ['firecrawl'],
+            'llama-index-llms-openai': ['llama_index'],
+            'llama-index-workflows': ['llama_index'],
+            'opentelemetry-api': ['opentelemetry'],
+            'opentelemetry-sdk': ['opentelemetry'],
+            'opentelemetry-proto': ['opentelemetry'],
+            'opentelemetry-exporter-otlp-proto-common': ['opentelemetry'],
+            'opentelemetry-exporter-otlp-proto-http': ['opentelemetry'],
         }
-        
-        # Try known mapping first
-        import_name = known_mappings.get(package_name)
-        
-        if import_name:
+
+        def _candidate_imports(name: str) -> Tuple[List[str], bool]:
+            candidates: List[str] = []
+            has_authoritative = False
+
+            # Prefer explicit mapping if known.
+            mapped = known_mappings.get(name)
+            if mapped:
+                candidates.extend(mapped)
+                has_authoritative = True
+
+            # Use installed metadata for authoritative import names.
+            dist_names = {name, name.replace('_', '-'), name.replace('-', '_')}
+            for dist_name in dist_names:
+                try:
+                    dist = importlib.metadata.distribution(dist_name)
+                except importlib.metadata.PackageNotFoundError:
+                    continue
+                top_level = dist.read_text('top_level.txt')
+                if not top_level:
+                    continue
+                for line in top_level.splitlines():
+                    mod = line.strip()
+                    if mod:
+                        candidates.append(mod)
+                        has_authoritative = True
+
+            # Heuristic fallbacks for legacy dist names.
+            candidates.append(name.replace('-', '_'))
+            candidates.append(name.replace('-', '_').lower())
+            candidates.append(name)
+
+            # De-duplicate while preserving order
+            seen: Set[str] = set()
+            ordered: List[str] = []
+            for item in candidates:
+                if item not in seen:
+                    seen.add(item)
+                    ordered.append(item)
+            return ordered, has_authoritative
+
+        candidates, has_authoritative = _candidate_imports(package_name)
+        if not candidates:
+            self.log(f"Skipped verification for {package_name}: no importable modules found")
+            return None
+
+        for import_name in candidates:
             try:
                 __import__(import_name)
                 return True
             except (ImportError, Exception):
-                pass
-        
-        # Try package name with dashes converted to underscores
-        import_name = package_name.replace('-', '_')
-        try:
-            __import__(import_name)
-            return True
-        except (ImportError, Exception):
-            pass
-        
-        # Try lowercase version
-        try:
-            __import__(import_name.lower())
-            return True
-        except (ImportError, Exception):
-            pass
-        
-        # Try original package name as last resort
-        try:
-            __import__(package_name)
-            return True
-        except (ImportError, Exception) as e:
-            # Some packages have import-time side effects that can fail
-            # or simply can't be imported (e.g., setuptools)
-            self.log(f"Could not verify {package_name}: {str(e)}")
-            return False
+                continue
+
+        # If we only had heuristic guesses, treat failure as "skipped"
+        # (likely a namespace-only or metadata-light distribution).
+        if not has_authoritative:
+            self.log(f"Skipped verification for {package_name}: no authoritative import name found")
+            return None
+
+        # Some packages have import-time side effects that can fail
+        # or simply can't be imported (e.g., setuptools)
+        self.log(f"Could not verify {package_name}: import attempts failed")
+        return False
     
     # ==================== UI AND DISPLAY ====================
     
@@ -1008,7 +1128,28 @@ class PipPackageGuardian:
         self.print(f"\n[bold]Selected {len(selected_packages)} package(s) for upgrade:[/bold]")
         for pkg in selected_packages:
             self.print(f"  • {pkg.name}: {pkg.current_version} → {pkg.latest_version}")
+
+        # If conda, warn about likely compiled packages in selection
+        if self.environment_info.get('type') == 'conda':
+            compiled = [p for p in selected_packages if self.is_likely_compiled(p.name)]
+            if compiled:
+                self.print("\n[yellow]Warning: These selected packages appear to include compiled binaries:[/yellow]")
+                for pkg in compiled:
+                    self.print(f"  • {pkg.name}")
+                self.print("[yellow]Prefer conda to upgrade these packages when possible.[/yellow]")
+                self.print("[yellow]Conda environment detected: compiled packages will be skipped to avoid conflicts.[/yellow]")
+                compiled_names = {p.name for p in compiled}
+                selected_packages = [p for p in selected_packages if p.name not in compiled_names]
+                self.print(f"[yellow]Skipping {len(compiled_names)} compiled package(s) in conda env.[/yellow]")
+                if selected_packages:
+                    self.print("\n[bold]Remaining package(s) after filtering:[/bold]")
+                    for pkg in selected_packages:
+                        self.print(f"  • {pkg.name}: {pkg.current_version} → {pkg.latest_version}")
         
+        if not selected_packages:
+            self.print("[yellow]No packages selected after conda compiled-package filtering[/yellow]")
+            return True
+
         if not self.confirm("\nProceed with upgrade?", default=False):
             self.print("[yellow]Upgrade cancelled[/yellow]")
             return True
@@ -1049,6 +1190,8 @@ class PipPackageGuardian:
         
         if success_count > 0:
             self.print(f"\n[green]Rollback available:[/green] bash {self.rollback_file}")
+            if self.confirm("Run pip check now?", default=True):
+                self.run_pip_check()
         
         return True  # Continue to main loop
     
